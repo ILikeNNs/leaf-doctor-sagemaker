@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Least-privilege access for the plant-disease project - an IAM user for day-to-day
+  work (console sign-in + `aws login`, no access keys) and the permissions boundary
+  that every IAM role created by the project stacks must carry.
+  Deploy ONCE with an administrator identity, as stack "plant-disease-access" in eu-north-1.
+
+Parameters:
+  Project:
+    Type: String
+    Default: plant-disease
+  UserName:
+    Type: String
+    Default: plant-disease-dev
+  Region:
+    Type: String
+    Default: eu-north-1
+    Description: Region of the project's workloads (the budget stack is always us-east-1).
+
+Resources:
+  # ------------------------------------------------------------------
+  # Ceiling for every role the project stacks create. Even if a role
+  # policy grants more, the effective permissions never exceed this.
+  # ------------------------------------------------------------------
+  RoleBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-boundary"
+      Description: Permissions boundary for roles created by the plant-disease stacks.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ProjectBucket
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket, s3:GetBucketLocation]
+            Resource: [!Sub "arn:${AWS::Partition}:s3:::${Project}-*", !Sub "arn:${AWS::Partition}:s3:::${Project}-*/*"]
+          - Sid: PullDeepLearningContainers
+            Effect: Allow
+            Action: [ecr:GetAuthorizationToken, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+            Resource: "*"
+          - Sid: LogsAndMetrics
+            Effect: Allow
+            Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams, cloudwatch:PutMetricData]
+            Resource: "*"
+          - Sid: SageMakerInProjectRegion
+            Effect: Allow
+            Action: sagemaker:*
+            Resource: !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:*"
+          - Sid: PassOnlyTheSageMakerRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-sagemaker"
+            Condition:
+              StringEquals: { "iam:PassedToService": sagemaker.amazonaws.com }
+
+  # ------------------------------------------------------------------
+  # Deployer part 1: CloudFormation and the infrastructure it creates.
+  # ------------------------------------------------------------------
+  DeployerInfraPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-deployer-infra"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ProjectStacksOnly
+            Effect: Allow
+            Action: cloudformation:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/${Project}-infra/*"
+              - !Sub "arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/${Project}-budget/*"
+          - Sid: CloudFormationGlobalReads
+            Effect: Allow
+            Action: [cloudformation:ValidateTemplate, cloudformation:ListStacks, cloudformation:GetTemplateSummary]
+            Resource: "*"
+
+          # IAM: only project-named roles, and only with the boundary attached.
+          - Sid: RoleLifecycleRequiresBoundary
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-*"
+            Condition:
+              StringEquals:
+                iam:PermissionsBoundary: !Ref RoleBoundary
+          - Sid: RoleReadAndHousekeeping
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListRoleTags
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:DeleteRole
+              - iam:SimulatePrincipalPolicy  # lets the SageMaker SDK validate the execution role
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-*"
+          - Sid: BoundaryCannotBeRemoved
+            Effect: Deny
+            Action: iam:DeleteRolePermissionsBoundary
+            Resource: "*"
+          - Sid: PassProjectRolesToProjectServices
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-*"
+            Condition:
+              StringEquals:
+                iam:PassedToService: [sagemaker.amazonaws.com, lambda.amazonaws.com]
+
+          - Sid: ProjectBuckets
+            Effect: Allow
+            Action: s3:*
+            Resource: [!Sub "arn:${AWS::Partition}:s3:::${Project}-*", !Sub "arn:${AWS::Partition}:s3:::${Project}-*/*"]
+          - Sid: ListBucketsForSageMakerSdk
+            Effect: Allow
+            Action: s3:ListAllMyBuckets
+            Resource: "*"
+          - Sid: ProjectFunctions
+            Effect: Allow
+            Action: lambda:*
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${Region}:${AWS::AccountId}:function:${Project}-*"
+          - Sid: HttpApisInProjectRegion
+            Effect: Allow
+            Action: [apigateway:GET, apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:apigateway:${Region}::/apis"
+              - !Sub "arn:${AWS::Partition}:apigateway:${Region}::/apis/*"
+              - !Sub "arn:${AWS::Partition}:apigateway:${Region}::/tags/*"
+          - Sid: ProjectEventRules
+            Effect: Allow
+            Action: events:*
+            Resource: !Sub "arn:${AWS::Partition}:events:${Region}:${AWS::AccountId}:rule/${Project}-*"
+          - Sid: ProjectLambdaLogGroups
+            Effect: Allow
+            Action: logs:*
+            Resource: !Sub "arn:${AWS::Partition}:logs:${Region}:${AWS::AccountId}:log-group:/aws/lambda/${Project}-*"
+          - Sid: ProjectBudget
+            Effect: Allow
+            Action: [budgets:ViewBudget, budgets:ModifyBudget]
+            Resource: !Sub "arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/${Project}-*"
+
+  # ------------------------------------------------------------------
+  # Deployer part 2: running the ML workflow, observing it, cost & quotas.
+  # ------------------------------------------------------------------
+  DeployerMlPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Project}-deployer-ml"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ProjectPipelines
+            Effect: Allow
+            Action:
+              - sagemaker:CreatePipeline
+              - sagemaker:UpdatePipeline
+              - sagemaker:DeletePipeline
+              - sagemaker:StartPipelineExecution
+              - sagemaker:StopPipelineExecution
+              - sagemaker:RetryPipelineExecution
+              - sagemaker:AddTags
+              - sagemaker:DeleteTags
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:pipeline/${Project}-*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:pipeline/${Project}-*/execution/*"
+          - Sid: ProjectModelRegistry
+            Effect: Allow
+            Action:
+              - sagemaker:CreateModelPackageGroup
+              - sagemaker:DeleteModelPackageGroup
+              - sagemaker:UpdateModelPackage
+              - sagemaker:DeleteModelPackage
+              - sagemaker:AddTags
+              - sagemaker:DeleteTags
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:model-package-group/${Project}-*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:model-package/${Project}-*/*"
+          - Sid: ProjectEndpoint
+            Effect: Allow
+            Action: [sagemaker:InvokeEndpoint, sagemaker:DeleteEndpoint, sagemaker:DeleteEndpointConfig]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:endpoint/${Project}-*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:endpoint-config/${Project}-*"
+          - Sid: SageMakerReadOnlyInProjectRegion
+            Effect: Allow
+            Action: [sagemaker:Describe*, sagemaker:List*, sagemaker:Get*, sagemaker:Search]
+            Resource: "*"
+            Condition:
+              StringEquals: { "aws:RequestedRegion": !Ref Region }
+          - Sid: StopRunawayJobs
+            Effect: Allow
+            Action: [sagemaker:StopTrainingJob, sagemaker:StopProcessingJob]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:training-job/*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:processing-job/*"
+          - Sid: ReadJobLogs
+            Effect: Allow
+            Action: [logs:GetLogEvents, logs:FilterLogEvents, logs:DescribeLogStreams, logs:StartLiveTail]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:logs:${Region}:${AWS::AccountId}:log-group:/aws/sagemaker/*"
+          - Sid: GlobalReads
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - cloudwatch:GetMetricData
+              - cloudwatch:ListMetrics
+              - ce:GetCostAndUsage
+              - ce:GetCostForecast
+              - servicequotas:GetServiceQuota
+              - servicequotas:ListServiceQuotas
+              - servicequotas:ListRequestedServiceQuotaChangeHistory
+              - servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota
+            Resource: "*"
+          - Sid: RequestSageMakerQuotaIncreases
+            Effect: Allow
+            Action: servicequotas:RequestServiceQuotaIncrease
+            Resource: !Sub "arn:${AWS::Partition}:servicequotas:${Region}:${AWS::AccountId}:sagemaker/*"
+          - Sid: ManageOwnPasswordAndMfa
+            Effect: Allow
+            Action:
+              - iam:GetUser
+              - iam:ChangePassword
+              - iam:GetLoginProfile
+              - iam:CreateVirtualMFADevice
+              - iam:EnableMFADevice
+              - iam:ResyncMFADevice
+              - iam:ListMFADevices
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${!aws:username}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:mfa/${!aws:username}"
+          - Sid: ListVirtualMfaDevices
+            Effect: Allow
+            Action: [iam:ListVirtualMFADevices, iam:GetAccountPasswordPolicy]
+            Resource: "*"
+
+  DeveloperUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref UserName
+      # No LoginProfile here (it would put a password in the template) and no access keys.
+      # Enable console sign-in once with `aws iam create-login-profile` - see the README.
+      ManagedPolicyArns:
+        - !Ref DeployerInfraPolicy
+        - !Ref DeployerMlPolicy
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/SignInLocalDevelopmentAccess"  # required for `aws login`
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+Outputs:
+  UserName:
+    Value: !Ref DeveloperUser
+  BoundaryPolicyArn:
+    Value: !Ref RoleBoundary
+  ConsoleSignInUrl:
+    Value: !Sub "https://${AWS::AccountId}.signin.aws.amazon.com/console"

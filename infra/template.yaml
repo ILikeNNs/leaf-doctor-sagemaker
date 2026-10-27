@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Plant disease detector (requires the plant-disease-access stack for the role boundary) - storage, IAM, model registry, approval->deploy trigger, prediction API.
+
+Parameters:
+  Project:
+    Type: String
+    Default: plant-disease
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: CORS origin of the web page, e.g. https://<you>.github.io
+
+Resources:
+  # ---------- Storage ----------
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Project}-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-spot-checkpoints
+            Status: Enabled
+            Prefix: checkpoints/
+            ExpirationInDays: 7
+          - Id: expire-pipeline-code-uploads
+            Status: Enabled
+            Prefix: !Sub "${Project}-train/"
+            ExpirationInDays: 30
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+  # ---------- SageMaker execution role (pipelines, jobs, endpoint) ----------
+  SageMakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-sagemaker"
+      PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${Project}-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sagemaker.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: sagemaker-project
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket, s3:GetBucketLocation]
+                Resource: [!GetAtt ArtifactBucket.Arn, !Sub "${ArtifactBucket.Arn}/*"]
+              - Sid: PullDeepLearningContainers
+                Effect: Allow
+                Action: [ecr:GetAuthorizationToken, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: "*"
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams, cloudwatch:PutMetricData]
+                Resource: "*"
+              - Sid: PipelineSteps
+                Effect: Allow
+                Action:
+                  - sagemaker:CreateProcessingJob
+                  - sagemaker:DescribeProcessingJob
+                  - sagemaker:StopProcessingJob
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - sagemaker:StopTrainingJob
+                  - sagemaker:CreateModelPackage
+                  - sagemaker:DescribeModelPackage
+                  - sagemaker:DescribeModelPackageGroup
+                  - sagemaker:CreateModel
+                  - sagemaker:DescribeModel
+                  - sagemaker:CreateEndpointConfig
+                  - sagemaker:DescribeEndpointConfig
+                  - sagemaker:CreateEndpoint
+                  - sagemaker:UpdateEndpoint
+                  - sagemaker:DescribeEndpoint
+                  - sagemaker:AddTags
+                  - sagemaker:ListTags
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: PassSelf
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-sagemaker"
+                Condition:
+                  StringEquals: { "iam:PassedToService": sagemaker.amazonaws.com }
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+  ModelPackageGroup:
+    Type: AWS::SageMaker::ModelPackageGroup
+    Properties:
+      ModelPackageGroupName: !Sub "${Project}-models"
+      ModelPackageGroupDescription: PlantVillage leaf disease classifiers
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+  # ---------- Approval in Model Registry -> start the deploy pipeline ----------
+  DeployTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-deploy-trigger"
+      PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${Project}-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-deploy-pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sagemaker:StartPipelineExecution
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/${Project}-deploy"
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt DeployTriggerLogs.Arn
+
+  DeployTriggerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Project}-deploy-trigger"
+      RetentionInDays: 14
+
+  DeployTriggerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DeployTriggerLogs
+    Properties:
+      FunctionName: !Sub "${Project}-deploy-trigger"
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt DeployTriggerRole.Arn
+      Environment:
+        Variables:
+          DEPLOY_PIPELINE: !Sub "${Project}-deploy"
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+
+          sm = boto3.client("sagemaker")
+
+
+          def handler(event, context):
+              arn = event["detail"]["ModelPackageArn"]
+              print(f"Model package approved: {arn}")
+              resp = sm.start_pipeline_execution(
+                  PipelineName=os.environ["DEPLOY_PIPELINE"],
+                  PipelineExecutionDisplayName=f"deploy-v{arn.rsplit('/', 1)[-1]}",
+                  PipelineParameters=[{"Name": "ModelPackageArn", "Value": arn}],
+              )
+              print(f"Started {resp['PipelineExecutionArn']}")
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+  ModelApprovedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Project}-model-approved"
+      Description: Start the deploy pipeline when a model package is approved.
+      EventPattern:
+        source: [aws.sagemaker]
+        detail-type: [SageMaker Model Package State Change]
+        detail:
+          ModelPackageGroupName: [!Sub "${Project}-models"]
+          ModelApprovalStatus: [Approved]
+      Targets:
+        - Id: deploy-trigger
+          Arn: !GetAtt DeployTriggerFunction.Arn
+
+  ModelApprovedPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeployTriggerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ModelApprovedRule.Arn
+
+  # ---------- Public prediction API: HTTP API -> Lambda -> serverless endpoint ----------
+  PredictRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-predict"
+      PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${Project}-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-endpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sagemaker:InvokeEndpoint
+                Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${Project}-serverless"
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt PredictLogs.Arn
+
+  PredictLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Project}-predict"
+      RetentionInDays: 14
+
+  PredictFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: PredictLogs
+    Properties:
+      FunctionName: !Sub "${Project}-predict"
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 29  # HTTP API integration limit is 30 s
+      MemorySize: 256
+      Role: !GetAtt PredictRole.Arn
+      Environment:
+        Variables:
+          ENDPOINT_NAME: !Sub "${Project}-serverless"
+      Code:
+        ZipFile: |
+          import base64
+          import json
+          import os
+
+          import boto3
+          from botocore.config import Config
+
+          runtime = boto3.client("sagemaker-runtime", config=Config(read_timeout=27, retries={"max_attempts": 1}))
+          MAX_BYTES = 3 * 1024 * 1024  # serverless payload limit is 4 MB
+
+
+          def reply(status, body):
+              return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(body)}
+
+
+          def handler(event, context):
+              body = event.get("body") or ""
+              data = base64.b64decode(body) if event.get("isBase64Encoded") else body.encode("latin-1")
+              ctype = event.get("headers", {}).get("content-type", "image/jpeg").split(";")[0]
+              if not data or ctype not in ("image/jpeg", "image/png"):
+                  return reply(400, {"error": "POST a JPEG or PNG image as the raw request body"})
+              if len(data) > MAX_BYTES:
+                  return reply(413, {"error": "Image too large; resize to under 3 MB"})
+              try:
+                  resp = runtime.invoke_endpoint(EndpointName=os.environ["ENDPOINT_NAME"], ContentType=ctype, Body=data)
+              except runtime.exceptions.ValidationError as e:
+                  return reply(503, {"error": "Model endpoint not deployed yet", "detail": str(e)})
+              except Exception as e:  # cold start timeouts, model errors
+                  print(repr(e))
+                  return reply(503, {"error": "Model is warming up, please retry in a few seconds"})
+              return reply(200, json.loads(resp["Body"].read()))
+      Tags: [{ Key: project, Value: !Ref Project }]
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${Project}-api"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowMethods: [POST, OPTIONS]
+        AllowHeaders: [content-type]
+      Tags: { project: !Ref Project }
+
+  PredictIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt PredictFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  PredictRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /predict
+      Target: !Sub "integrations/${PredictIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PredictFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/predict"
+
+Outputs:
+  BucketName:
+    Value: !Ref ArtifactBucket
+  SageMakerRoleArn:
+    Value: !GetAtt SageMakerRole.Arn
+  ModelPackageGroupName:
+    Value: !Sub "${Project}-models"
+  PredictUrl:
+    Value: !Sub "${HttpApi.ApiEndpoint}/predict"

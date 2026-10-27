@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaf Doctor</title>
+<style>
+  :root { --bg:#f6f7f4; --card:#fff; --ink:#1d2a1f; --muted:#5d6b5f; --accent:#2f7d4a; --bar:#d9eadf; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121714; --card:#1b221d; --ink:#e6efe8; --muted:#9bb0a0; --accent:#5fbf80; --bar:#26402f; --err:#f2b8b5; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:32px 16px; }
+  h1 { margin:0 0 4px; font-size:1.6rem; }
+  p.sub { margin:0 0 24px; color:var(--muted); }
+  .card { background:var(--card); border-radius:12px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  label.drop { display:block; border:2px dashed var(--muted); border-radius:10px; padding:28px; text-align:center; cursor:pointer; }
+  label.drop:hover { border-color:var(--accent); }
+  input[type=file] { display:none; }
+  img#preview { display:none; max-width:100%; max-height:280px; margin:16px auto 0; border-radius:8px; }
+  .row { margin-top:14px; }
+  .name { display:flex; justify-content:space-between; gap:8px; }
+  .track { height:8px; background:var(--bar); border-radius:4px; overflow:hidden; margin-top:4px; }
+  .fill { height:100%; background:var(--accent); }
+  #status { color:var(--muted); margin-top:16px; min-height:1.5em; }
+  #status.err { color:var(--err); }
+  footer { margin-top:24px; color:var(--muted); font-size:.85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Leaf Doctor</h1>
+  <p class="sub">Upload a photo of a single leaf. A CNN fine-tuned on PlantVillage (38 crop/disease classes) runs on a SageMaker serverless endpoint.</p>
+  <div class="card">
+    <label class="drop">Click to choose a leaf photo<input type="file" id="file" accept="image/*"></label>
+    <img id="preview" alt="Selected leaf">
+    <div id="status"></div>
+    <div id="results"></div>
+  </div>
+  <footer>Research demo, not agronomic advice. Trained on lab photos with plain backgrounds, so accuracy drops on field photos.</footer>
+</main>
+<script>
+  // Set this to the PredictUrl output of the CloudFormation stack.
+  const API_URL = "https://REPLACE_ME.execute-api.eu-north-1.amazonaws.com/predict";
+
+  const $ = (id) => document.getElementById(id);
+
+  // Downscale in the browser: the model sees 224px anyway, and small payloads keep latency low.
+  function resize(file, maxSide = 512) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Could not read image"))), "image/jpeg", 0.9);
+      };
+      img.onerror = () => reject(new Error("Could not read image"));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  async function predict(blob, attempt = 1) {
+    const res = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: blob });
+    const data = await res.json().catch(() => ({}));
+    // A serverless endpoint that has been idle needs a cold start; retry a couple of times.
+    if (res.status === 503 && attempt < 3) {
+      $("status").textContent = "Waking up the model (cold start)...";
+      return predict(blob, attempt + 1);
+    }
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data.predictions;
+  }
+
+  function render(preds) {
+    $("results").innerHTML = preds.map((p) => `
+      <div class="row">
+        <div class="name"><span><strong>${p.crop}</strong> - ${p.condition}</span><span>${(p.probability * 100).toFixed(1)}%</span></div>
+        <div class="track"><div class="fill" style="width:${p.probability * 100}%"></div></div>
+      </div>`).join("");
+  }
+
+  $("file").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $("preview").src = URL.createObjectURL(file);
+    $("preview").style.display = "block";
+    $("results").innerHTML = "";
+    $("status").className = "";
+    $("status").textContent = "Analysing...";
+    try {
+      const t0 = performance.now();
+      render(await predict(await resize(file)));
+      $("status").textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    } catch (err) {
+      $("status").className = "err";
+      $("status").textContent = err.message;
+    }
+  });
+</script>
+</body>
+</html>
