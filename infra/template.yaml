@@ -84,12 +84,14 @@ Resources:
                   - sagemaker:DescribeModel
                   - sagemaker:CreateEndpointConfig
                   - sagemaker:DescribeEndpointConfig
-                  - sagemaker:CreateEndpoint
-                  - sagemaker:UpdateEndpoint
-                  - sagemaker:DescribeEndpoint
                   - sagemaker:AddTags
                   - sagemaker:ListTags
                 Resource: !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:*"
+              # The endpoint itself is created/updated by DeployEndpointFunction (a pipeline LambdaStep).
+              - Sid: InvokeDeployEndpointFunction
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${Project}-deploy-endpoint"
               - Sid: PassSelf
                 Effect: Allow
                 Action: iam:PassRole
@@ -188,6 +190,100 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ModelApprovedRule.Arn
+
+  # ---------- Deploy pipeline step: create or update the serverless endpoint ----------
+  # SageMaker Pipelines' Endpoint step always calls CreateEndpoint, which fails once the
+  # endpoint exists. This function creates it the first time and updates it in place
+  # afterwards (the old model keeps serving until the new one is healthy).
+  DeployEndpointRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-deploy-endpoint"
+      PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${Project}-boundary"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: manage-endpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sagemaker:DescribeEndpoint, sagemaker:CreateEndpoint, sagemaker:UpdateEndpoint, sagemaker:AddTags]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${Project}-serverless"
+                  - !Sub "arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint-config/*"
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt DeployEndpointLogs.Arn
+
+  DeployEndpointLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Project}-deploy-endpoint"
+      RetentionInDays: 14
+
+  DeployEndpointFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DeployEndpointLogs
+    Properties:
+      FunctionName: !Sub "${Project}-deploy-endpoint"
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 600  # a Pipelines Lambda step waits at most 10 minutes
+      Role: !GetAtt DeployEndpointRole.Arn
+      Environment:
+        Variables:
+          PROJECT: !Ref Project
+      Code:
+        ZipFile: |
+          import os
+          import time
+
+          import boto3
+
+          sm = boto3.client("sagemaker")
+
+
+          def describe(name):
+              try:
+                  return sm.describe_endpoint(EndpointName=name)
+              except sm.exceptions.ClientError as e:
+                  if "Could not find endpoint" in str(e):
+                      return None
+                  raise
+
+
+          def handler(event, context):
+              name, config = event["endpoint_name"], event["endpoint_config_name"]
+              current = describe(name)
+              old_reason = current.get("FailureReason") if current else None  # left over from an earlier failed update
+              if current is None:
+                  sm.create_endpoint(EndpointName=name, EndpointConfigName=config,
+                                     Tags=[{"Key": "project", "Value": os.environ["PROJECT"]}])
+                  action = "created"
+              elif current["EndpointStatus"] == "InService":
+                  sm.update_endpoint(EndpointName=name, EndpointConfigName=config)
+                  action = "updated"
+              else:
+                  raise RuntimeError(f"Endpoint {name} is {current['EndpointStatus']}; cannot deploy now")
+              print(f"{action} {name} -> {config}")
+
+              # Wait for the result so the pipeline step fails if the new model doesn't come up.
+              while context.get_remaining_time_in_millis() > 20_000:
+                  time.sleep(15)
+                  ep = describe(name)
+                  status = ep["EndpointStatus"]
+                  if status == "InService" and ep["EndpointConfigName"] == config:
+                      return {"action": action, "endpoint_status": status}
+                  if status == "Failed" or (status == "InService" and ep.get("FailureReason") not in (None, old_reason)):
+                      # A failed update rolls back to the previous config and sets FailureReason.
+                      raise RuntimeError(f"Deploy failed: {ep.get('FailureReason')}")
+              raise TimeoutError(f"Endpoint {name} still {status} after waiting")
+      Tags: [{ Key: project, Value: !Ref Project }]
 
   # ---------- Public prediction API: HTTP API -> Lambda -> serverless endpoint ----------
   PredictRole:
@@ -316,6 +412,8 @@ Outputs:
     Value: !Ref ArtifactBucket
   SageMakerRoleArn:
     Value: !GetAtt SageMakerRole.Arn
+  DeployEndpointFunctionArn:
+    Value: !GetAtt DeployEndpointFunction.Arn
   ModelPackageGroupName:
     Value: !Sub "${Project}-models"
   PredictUrl:

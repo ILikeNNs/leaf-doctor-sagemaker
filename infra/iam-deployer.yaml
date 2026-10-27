@@ -52,6 +52,10 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-sagemaker"
             Condition:
               StringEquals: { "iam:PassedToService": sagemaker.amazonaws.com }
+          - Sid: InvokeProjectFunctions  # pipeline Lambda steps (deploy-endpoint)
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${Region}:${AWS::AccountId}:function:${Project}-*"
 
   # ------------------------------------------------------------------
   # Deployer part 1: CloudFormation and the infrastructure it creates.

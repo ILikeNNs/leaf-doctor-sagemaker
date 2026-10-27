@@ -1,15 +1,18 @@
 """Deploy pipeline: approved model package -> Model -> serverless EndpointConfig -> Endpoint.
 
-EndpointStep creates the endpoint on the first run and updates it in place
-afterwards. Serverless inference has no idle cost, which is what keeps the
-project under budget.
+The last step is a Lambda step (DeployEndpointFunction in infra/template.yaml) that
+creates the endpoint on the first run and updates it in place afterwards. Pipelines'
+own Endpoint step always calls CreateEndpoint, so it can't redeploy an existing endpoint.
+Serverless inference has no idle cost, which is what keeps the project under budget.
 """
 
+from sagemaker.core.lambda_helper import Lambda
 from sagemaker.core.workflow.execution_variables import ExecutionVariables
 from sagemaker.core.workflow.functions import Join
 from sagemaker.core.workflow.parameters import ParameterInteger, ParameterString
 from sagemaker.core.workflow.pipeline_context import PipelineSession
-from sagemaker.mlops.workflow import EndpointConfigStep, EndpointStep, ModelStep, Pipeline
+from sagemaker.mlops.workflow import EndpointConfigStep, ModelStep, Pipeline
+from sagemaker.mlops.workflow.lambda_step import LambdaOutput, LambdaStep
 
 from pipelines import config
 
@@ -22,7 +25,7 @@ class _PackageModel:
         self.sagemaker_session = session
 
 
-def build(session: PipelineSession, role: str) -> Pipeline:
+def build(session: PipelineSession, role: str, deploy_function_arn: str) -> Pipeline:
     package_arn = ParameterString("ModelPackageArn")
     memory_mb = ParameterInteger("MemorySizeInMB", default_value=3072)
     max_concurrency = ParameterInteger("MaxConcurrency", default_value=2)
@@ -50,12 +53,14 @@ def build(session: PipelineSession, role: str) -> Pipeline:
             }],
         ),
     )
-    endpoint = EndpointStep(
+    endpoint = LambdaStep(
         name="DeployEndpoint",
-        step_args=session.create_endpoint(
-            endpoint_name=config.ENDPOINT_NAME,
-            config_name=endpoint_config.properties.EndpointConfigName,
-        ),
+        lambda_func=Lambda(function_arn=deploy_function_arn, session=session),
+        inputs={
+            "endpoint_name": config.ENDPOINT_NAME,
+            "endpoint_config_name": endpoint_config.properties.EndpointConfigName,
+        },
+        outputs=[LambdaOutput(output_name="action"), LambdaOutput(output_name="endpoint_status")],
     )
 
     return Pipeline(

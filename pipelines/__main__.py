@@ -27,7 +27,7 @@ def pipelines(spot=True):
     role = out["SageMakerRoleArn"]
     return (
         train_pipeline.build(session, role, out["BucketName"], spot=spot),
-        deploy_pipeline.build(session, role),
+        deploy_pipeline.build(session, role, out["DeployEndpointFunctionArn"]),
         role,
     )
 

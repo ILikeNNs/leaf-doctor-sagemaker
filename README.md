@@ -32,7 +32,20 @@ used through a small web page.
 - **Human in the loop.** New models wait in `PendingManualApproval`. Approving one triggers the deploy pipeline automatically.
 - **Same preprocessing for evaluation and serving.** `evaluate.py` imports the endpoint's own `inference.py`, so the test scores come from the exact code path that serves predictions.
 - **Spot training with resume.** The training script checkpoints every epoch to S3 and resumes if the spot instance is reclaimed.
+- **Zero-downtime redeploys.** The deploy pipeline's last step is a Lambda step that creates the endpoint the first time and calls `UpdateEndpoint` afterwards, so the old model serves until the new one is healthy. (Pipelines' built-in Endpoint step always calls `CreateEndpoint`, which fails once the endpoint exists.)
 - **No custom containers.** It uses AWS PyTorch 2.6 Deep Learning Containers, so nothing is stored in ECR.
+
+## Results
+
+EfficientNet-B0, 5 epochs on one ml.g4dn.xlarge (about 13 minutes of training), evaluated on the official PlantVillage test split (10,709 images) through the endpoint's own inference code:
+
+| Metric | Value |
+|---|---|
+| Test accuracy | 99.57% |
+| Macro F1 | 0.9946 |
+| Weakest classes (F1) | Corn Cercospora/Gray leaf spot 0.943, Corn Northern Leaf Blight 0.971, Tomato Early blight 0.971 |
+
+The weakest classes are visually similar lesions on the same crop. PlantVillage photos are lab images on plain backgrounds, so expect lower accuracy on field photos (see *Ideas for next steps*).
 
 ## Repository layout
 
@@ -118,6 +131,15 @@ python -m pipelines train --smoke
 # 4. Full training run (GPU spot)
 python -m pipelines train
 ```
+
+Spot GPU capacity in eu-north-1 can be unavailable for hours (the job sits in `Starting` with "Insufficient capacity"). In that case, stop the run and use another instance type or on-demand capacity:
+
+```powershell
+python -m pipelines train --instance-type ml.g5.xlarge   # different spot pool
+python -m pipelines train --on-demand                    # ml.g4dn.xlarge on-demand, about $0.25 per run
+```
+
+`train` re-upserts the training pipeline before starting it, because spot vs on-demand is part of the pipeline definition.
 
 Watch the runs in SageMaker Studio → Pipelines, or with `aws sagemaker list-pipeline-executions --pipeline-name plant-disease-train`.
 
