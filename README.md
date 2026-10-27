@@ -1,5 +1,7 @@
 # Leaf Doctor: plant disease detection on SageMaker
 
+**Live demo:** https://ilikenns.github.io/leaf-doctor-sagemaker/
+
 An end-to-end deep learning project on AWS (eu-north-1, Stockholm). It fine-tunes an
 ImageNet CNN (EfficientNet-B0 by default) on the public **PlantVillage** dataset
 (54k leaf images, 38 crop/disease classes). The model is trained, evaluated, registered
@@ -22,7 +24,7 @@ used through a small web page.
                  │ from package│   │ Serverless 3 GB, conc. 2 │   │ update in place)       │
                  └─────────────┘   └──────────────────────────┘   └───────────┬────────────┘
                                                                               │
-         web/index.html ──POST image──▶ HTTP API ──▶ Lambda ──InvokeEndpoint──┘
+        docs/index.html ──POST image──▶ HTTP API ──▶ Lambda ──InvokeEndpoint──┘
 ```
 
 ## Highlights
@@ -58,7 +60,7 @@ The weakest classes are visually similar lesions on the same crop. PlantVillage 
 | `pipelines/` | Definitions of both pipelines plus a CLI (`python -m pipelines ...`) |
 | `infra/template.yaml` | S3, IAM role, model package group, approval trigger, HTTP API and predict Lambda |
 | `infra/budget.yaml` | $10/month budget with email alerts (us-east-1) |
-| `web/index.html` | Static demo page (GitHub Pages or any static host) |
+| `docs/index.html` | Static demo page, served by GitHub Pages from `main`/`docs` |
 
 ## One-time access setup (administrator)
 
@@ -163,7 +165,17 @@ $url = aws cloudformation describe-stacks --region eu-north-1 --stack-name plant
 curl.exe -X POST -H "Content-Type: image/jpeg" --data-binary "@leaf.jpg" $url
 ```
 
-Then set `API_URL` in `web/index.html` to that URL and publish the page (for example on GitHub Pages). Redeploy the stack with `--parameter-overrides AllowedOrigin=https://<you>.github.io` to restrict CORS to your page.
+### Demo page
+
+`docs/index.html` is published with GitHub Pages (Settings → Pages → Deploy from a branch → `main` / `/docs`). If you fork this, set `API_URL` in it to your `PredictUrl`, and restrict CORS to your Pages origin (scheme and host only, no path):
+
+```powershell
+aws cloudformation deploy --region eu-north-1 --stack-name plant-disease-infra `
+  --template-file infra/template.yaml --capabilities CAPABILITY_NAMED_IAM `
+  --tags project=plant-disease --parameter-overrides AllowedOrigin=https://<you>.github.io
+```
+
+CORS only stops other websites from calling the API from a browser. Scripts can still call it directly, so the real limits are the API throttling (5 req/s) and the endpoint's `MaxConcurrency`.
 
 ## Pipeline parameters
 
