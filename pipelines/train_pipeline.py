@@ -22,7 +22,7 @@ from sagemaker.train import ModelTrainer
 from pipelines import config
 
 
-def build(session: PipelineSession, role: str, bucket: str) -> Pipeline:
+def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -> Pipeline:
     s3 = f"s3://{bucket}"
     region = session.boto_region_name
 
@@ -72,13 +72,15 @@ def build(session: PipelineSession, role: str, bucket: str) -> Pipeline:
     )
     dataset_uri = preprocess.properties.ProcessingOutputConfig.Outputs["dataset"].S3Output.S3Uri
 
-    # 2. Fine-tune on managed spot capacity, checkpointing every epoch.
+    # 2. Fine-tune on managed spot capacity (or on-demand if spot=False), checkpointing every epoch.
+    #    Spot is a build-time choice: the SDK's Compute config doesn't accept a pipeline parameter for it.
     trainer = ModelTrainer(
         training_image=train_image,
         source_code=SourceCode(source_dir=config.SRC_DIR, entry_script="train.py"),
         compute=Compute(instance_type=train_instance, instance_count=1, volume_size_in_gb=30,
-                        enable_managed_spot_training=True),
-        stopping_condition=StoppingCondition(max_runtime_in_seconds=2 * 3600, max_wait_time_in_seconds=4 * 3600),
+                        enable_managed_spot_training=spot),
+        stopping_condition=StoppingCondition(max_runtime_in_seconds=2 * 3600,
+                                             max_wait_time_in_seconds=4 * 3600 if spot else None),
         # Per-execution prefix: a spot restart resumes its own run, never a previous one.
         checkpoint_config=CheckpointConfig(
             s3_uri=Join(on="/", values=[f"{s3}/checkpoints", ExecutionVariables.PIPELINE_EXECUTION_ID])),
