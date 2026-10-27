@@ -58,6 +58,10 @@ Resources:
   # ------------------------------------------------------------------
   DeployerInfraPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W3037]  # apigateway:TagResource/UntagResource, see HttpApisInProjectRegion
     Properties:
       ManagedPolicyName: !Sub "${Project}-deployer-infra"
       PolicyDocument:
@@ -130,7 +134,10 @@ Resources:
             Resource: !Sub "arn:${AWS::Partition}:lambda:${Region}:${AWS::AccountId}:function:${Project}-*"
           - Sid: HttpApisInProjectRegion
             Effect: Allow
-            Action: [apigateway:GET, apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE]
+            # TagResource/UntagResource: CloudFormation tags API Gateway V2 resources with these
+            # IAM actions (stack tags propagate). Real actions, missing from cfn-lint's action list.
+            Action: [apigateway:GET, apigateway:POST, apigateway:PUT, apigateway:PATCH, apigateway:DELETE,
+                     apigateway:TagResource, apigateway:UntagResource]
             Resource:
               - !Sub "arn:${AWS::Partition}:apigateway:${Region}::/apis"
               - !Sub "arn:${AWS::Partition}:apigateway:${Region}::/apis/*"

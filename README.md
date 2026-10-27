@@ -102,8 +102,10 @@ Run everything from the repository root (PowerShell):
 ```powershell
 # 1. Infrastructure
 aws cloudformation deploy --region eu-north-1 --stack-name plant-disease-infra `
-  --template-file infra/template.yaml --capabilities CAPABILITY_NAMED_IAM
+  --template-file infra/template.yaml --capabilities CAPABILITY_NAMED_IAM `
+  --tags project=plant-disease
 
+# No --tags here: the deployer has no budgets:TagResource, and a budget has no cost to allocate anyway
 aws cloudformation deploy --region us-east-1 --stack-name plant-disease-budget `
   --template-file infra/budget.yaml --parameter-overrides BudgetEmail=you@example.com
 
