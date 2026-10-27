@@ -21,9 +21,13 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      # SageMaker jobs always write with SSE-KMS (the aws/s3 key when no KmsKeyId is given),
+      # so the bucket uses the same key for everything. The S3 Bucket Key cuts KMS requests,
+      # which are billed per object, by ~99%.
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: "aws:kms" }
+            BucketKeyEnabled: true
       LifecycleConfiguration:
         Rules:
           - Id: expire-spot-checkpoints
