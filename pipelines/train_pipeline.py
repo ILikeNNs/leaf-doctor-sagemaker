@@ -83,7 +83,7 @@ def build(session: PipelineSession, role: str, bucket: str) -> Pipeline:
         checkpoint_config=CheckpointConfig(
             s3_uri=Join(on="/", values=[f"{s3}/checkpoints", ExecutionVariables.PIPELINE_EXECUTION_ID])),
         output_data_config=OutputDataConfig(s3_output_path=f"{s3}/models"),
-        hyperparameters={"epochs": epochs, "arch": arch, "batch-size": 64, "lr": 1e-3},
+        hyperparameters={"epochs": epochs.to_string(), "arch": arch, "batch-size": 64, "lr": 1e-3},
         base_job_name=f"{config.PROJECT}-train",
         role=role,
         sagemaker_session=session,

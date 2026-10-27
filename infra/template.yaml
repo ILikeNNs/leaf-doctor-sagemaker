@@ -79,6 +79,7 @@ Resources:
                   - sagemaker:CreateModelPackage
                   - sagemaker:DescribeModelPackage
                   - sagemaker:DescribeModelPackageGroup
+                  - sagemaker:CreateModelPackageGroup  # the Register step calls it even when the group exists
                   - sagemaker:CreateModel
                   - sagemaker:DescribeModel
                   - sagemaker:CreateEndpointConfig

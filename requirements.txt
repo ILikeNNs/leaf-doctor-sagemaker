@@ -1,3 +1,3 @@
 sagemaker>=3.27,<4.0
-boto3
+boto3[crt]  # crt: needed for `aws login` credentials
 cfn-lint
