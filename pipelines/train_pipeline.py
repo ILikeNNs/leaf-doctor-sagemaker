@@ -47,15 +47,17 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
 
     # 1. Download + split. Cached for 30 days so retraining doesn't re-download 2 GB.
     #    One prefix per dataset size: outputs only add files, so sizes must never share a folder.
+    #    The prefix is also passed as an argument because the cache key ignores output paths:
+    #    without it, a cache hit could return a run that wrote to a different folder.
+    dataset_s3 = Join(on="", values=[f"{s3}/data/plantvillage/max-", max_per_class])
     preprocess = ProcessingStep(
         name="Preprocess",
         step_args=processor("preprocess", 30).run(
             code=config.script("preprocess.py"),
-            arguments=["--max-per-class", max_per_class.to_string()],
+            arguments=["--max-per-class", max_per_class.to_string(), "--output-s3", dataset_s3],
             outputs=[
                 ProcessingOutput(output_name="dataset", s3_output=ProcessingS3Output(
-                    s3_uri=Join(on="", values=[f"{s3}/data/plantvillage/max-", max_per_class]),
-                    local_path="/opt/ml/processing/output",
+                    s3_uri=dataset_s3, local_path="/opt/ml/processing/output",
                     s3_upload_mode="EndOfJob")),
             ],
         ),

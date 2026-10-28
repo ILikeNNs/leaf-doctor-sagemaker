@@ -51,7 +51,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--max-per-class", type=int, default=0, help="0 = no cap (use for quick smoke tests)")
+    parser.add_argument("--output-s3", help="where SageMaker uploads the output; logged, and part of the cache key")
     args = parser.parse_args()
+    print(f"Output will be uploaded to {args.output_s3}")
 
     os.makedirs(WORK_DIR, exist_ok=True)
     zip_path = download(f"{HF_BASE}/data.zip", f"{WORK_DIR}/data.zip")
