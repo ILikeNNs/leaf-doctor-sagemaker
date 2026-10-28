@@ -39,13 +39,13 @@ used through a small web page.
 
 ## Results
 
-EfficientNet-B0, 5 epochs on one ml.g4dn.xlarge (about 13 minutes of training), evaluated on the official PlantVillage test split (10,709 images) through the endpoint's own inference code:
+EfficientNet-B0, 5 epochs on one ml.g4dn.xlarge (about 12 minutes of training), evaluated on the official PlantVillage test split (10,709 images) through the endpoint's own inference code:
 
 | Metric | Value |
 |---|---|
-| Test accuracy | 99.57% |
-| Macro F1 | 0.9946 |
-| Weakest classes (F1) | Corn Cercospora/Gray leaf spot 0.943, Corn Northern Leaf Blight 0.971, Tomato Early blight 0.971 |
+| Test accuracy | 99.60% |
+| Macro F1 | 0.9944 |
+| Weakest classes (F1) | Corn Cercospora/Gray leaf spot 0.919, Corn Northern Leaf Blight 0.962, Tomato Target Spot 0.983 |
 
 The weakest classes are visually similar lesions on the same crop. PlantVillage photos are lab images on plain backgrounds, so expect lower accuracy on field photos (see *Ideas for next steps*).
 
