@@ -46,6 +46,15 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // Wake the serverless endpoint as soon as the page opens, so it's usually warm by the
+  // time a photo is chosen. Errors are ignored; the real request retries on 503 anyway.
+  const warmUp = new Promise((resolve) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    canvas.toBlob(resolve, "image/jpeg");
+  }).then((blob) => fetch(API_URL, { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: blob }))
+    .catch(() => {});
+
   // Downscale in the browser: the model sees 224px anyway, and small payloads keep latency low.
   function resize(src, maxSide = 512) {
     return new Promise((resolve, reject) => {
@@ -94,7 +103,10 @@
     $("status").textContent = "Analysing...";
     try {
       const t0 = performance.now();
-      render(await predict(await resize($("preview").src)));
+      const blob = await resize($("preview").src);
+      // A request sent alongside the warm-up would start a second cold instance.
+      await warmUp;
+      render(await predict(blob));
       $("status").textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
     } catch (err) {
       $("status").className = "err";
