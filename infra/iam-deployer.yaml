@@ -201,6 +201,14 @@ Resources:
             Resource:
               - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:endpoint/${Project}-*"
               - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:endpoint-config/${Project}-*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:endpoint-config/pipelines-*"
+          # Cleanup of models/configs left by old deploys; Pipelines may rename them to pipelines-*.
+          - Sid: ProjectModelCleanup
+            Effect: Allow
+            Action: sagemaker:DeleteModel
+            Resource:
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:model/${Project}-*"
+              - !Sub "arn:${AWS::Partition}:sagemaker:${Region}:${AWS::AccountId}:model/pipelines-*"
           - Sid: SageMakerReadOnlyInProjectRegion
             Effect: Allow
             Action: [sagemaker:Describe*, sagemaker:List*, sagemaker:Get*, sagemaker:Search]

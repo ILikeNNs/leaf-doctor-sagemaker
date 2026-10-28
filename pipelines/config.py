@@ -1,9 +1,9 @@
 """Shared settings. Infrastructure values are read from the CloudFormation stack outputs."""
 
 import os
-from functools import lru_cache
 
 import boto3
+from sagemaker.core import image_uris
 
 REGION = os.environ.get("AWS_REGION", "eu-north-1")
 PROJECT = "plant-disease"
@@ -28,7 +28,12 @@ def script(name):
     return os.path.relpath(os.path.join(SRC_DIR, name)).replace(os.sep, "/")
 
 
-@lru_cache(maxsize=1)
+def pytorch_image(instance_type, scope="training", region=REGION):
+    """URI of the AWS PyTorch container; instance_type only selects the CPU or GPU flavour."""
+    return image_uris.retrieve("pytorch", region=region, version=PYTORCH_VERSION, py_version=PY_VERSION,
+                               instance_type=instance_type, image_scope=scope)
+
+
 def stack_outputs():
     cfn = boto3.client("cloudformation", region_name=REGION)
     stack = cfn.describe_stacks(StackName=STACK_NAME)["Stacks"][0]

@@ -39,19 +39,19 @@ def main():
     with torch.no_grad():
         for x, y in DataLoader(test_ds, batch_size=64, num_workers=os.cpu_count() or 1):
             pred = artifacts["model"](x).argmax(1)
-            for t, p in zip(y.tolist(), pred.tolist()):
-                confusion[t, p] += 1
+            confusion += torch.bincount(y * n + pred, minlength=n * n).view(n, n)
 
     tp = confusion.diag().float()
     precision = tp / confusion.sum(0).clamp(min=1)
     recall = tp / confusion.sum(1).clamp(min=1)
     f1 = 2 * precision * recall / (precision + recall).clamp(min=1e-9)
     accuracy = (tp.sum() / confusion.sum()).item()
+    macro_f1 = f1.mean().item()
 
     report = {
         "multiclass_classification_metrics": {
             "accuracy": {"value": accuracy, "standard_deviation": "NaN"},
-            "macro_f1": {"value": f1.mean().item(), "standard_deviation": "NaN"},
+            "macro_f1": {"value": macro_f1, "standard_deviation": "NaN"},
             "confusion_matrix": {
                 classes[i]: {classes[j]: int(confusion[i, j]) for j in range(n)} for i in range(n)
             },
@@ -62,7 +62,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(os.path.join(OUTPUT_DIR, "evaluation.json"), "w") as f:
         json.dump(report, f, indent=2)
-    print(f"accuracy={accuracy:.4f} macro_f1={f1.mean().item():.4f}")
+    print(f"accuracy={accuracy:.4f} macro_f1={macro_f1:.4f}")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ The registered model package waits in PendingManualApproval. Approving it in the
 Model Registry fires an EventBridge rule that starts the deploy pipeline.
 """
 
-from sagemaker.core import image_uris
 from sagemaker.core.model_metrics import MetricsSource, ModelMetrics
 from sagemaker.core.processing import ScriptProcessor
 from sagemaker.core.shapes import ProcessingInput, ProcessingOutput, ProcessingS3Input, ProcessingS3Output
@@ -33,20 +32,10 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
     min_accuracy = ParameterFloat("MinTestAccuracy", default_value=0.95)
     approval = ParameterString("ModelApprovalStatus", default_value="PendingManualApproval")
 
-    cpu_image = image_uris.retrieve(
-        "pytorch", region=region, version=config.PYTORCH_VERSION, py_version=config.PY_VERSION,
-        instance_type="ml.m5.xlarge", image_scope="training",
-    )
-    gpu_image = image_uris.retrieve(
-        "pytorch", region=region, version=config.PYTORCH_VERSION, py_version=config.PY_VERSION,
-        instance_type="ml.g4dn.xlarge", image_scope="training",
-    )
+    cpu_image = config.pytorch_image("ml.m5.xlarge", region=region)
     # Must match TrainInstanceType (GPU image for ml.g4dn/g5, CPU image for ml.m5/c5).
-    train_image = ParameterString("TrainImage", default_value=gpu_image)
-    inference_image = image_uris.retrieve(
-        "pytorch", region=region, version=config.PYTORCH_VERSION, py_version=config.PY_VERSION,
-        instance_type="ml.m5.large", image_scope="inference",
-    )
+    train_image = ParameterString("TrainImage", default_value=config.pytorch_image("ml.g4dn.xlarge", region=region))
+    inference_image = config.pytorch_image("ml.m5.large", "inference", region=region)
 
     def processor(name, volume_gb):
         return ScriptProcessor(
@@ -57,6 +46,7 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
         )
 
     # 1. Download + split. Cached for 30 days so retraining doesn't re-download 2 GB.
+    #    One prefix per dataset size: outputs only add files, so sizes must never share a folder.
     preprocess = ProcessingStep(
         name="Preprocess",
         step_args=processor("preprocess", 30).run(
@@ -64,13 +54,17 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
             arguments=["--max-per-class", max_per_class.to_string()],
             outputs=[
                 ProcessingOutput(output_name="dataset", s3_output=ProcessingS3Output(
-                    s3_uri=f"{s3}/data/plantvillage", local_path="/opt/ml/processing/output",
+                    s3_uri=Join(on="", values=[f"{s3}/data/plantvillage/max-", max_per_class]),
+                    local_path="/opt/ml/processing/output",
                     s3_upload_mode="EndOfJob")),
             ],
         ),
         cache_config=CacheConfig(enable_caching=True, expire_after="P30D"),
     )
     dataset_uri = preprocess.properties.ProcessingOutputConfig.Outputs["dataset"].S3Output.S3Uri
+
+    def split(name):
+        return Join(on="/", values=[dataset_uri, name])
 
     # 2. Fine-tune on managed spot capacity (or on-demand if spot=False), checkpointing every epoch.
     #    Spot is a build-time choice: the SDK's Compute config doesn't accept a pipeline parameter for it.
@@ -93,8 +87,8 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
     train = TrainingStep(
         name="Train",
         step_args=trainer.train(input_data_config=[
-            InputData(channel_name="train", data_source=Join(on="/", values=[dataset_uri, "train"])),
-            InputData(channel_name="val", data_source=Join(on="/", values=[dataset_uri, "val"])),
+            InputData(channel_name="train", data_source=split("train")),
+            InputData(channel_name="val", data_source=split("val")),
         ]),
     )
     model_data = train.properties.ModelArtifacts.S3ModelArtifacts
@@ -110,12 +104,14 @@ def build(session: PipelineSession, role: str, bucket: str, spot: bool = True) -
                     s3_uri=model_data, local_path="/opt/ml/processing/model",
                     s3_data_type="S3Prefix", s3_input_mode="File")),
                 ProcessingInput(input_name="test", s3_input=ProcessingS3Input(
-                    s3_uri=Join(on="/", values=[dataset_uri, "test"]), local_path="/opt/ml/processing/test",
+                    s3_uri=split("test"), local_path="/opt/ml/processing/test",
                     s3_data_type="S3Prefix", s3_input_mode="File")),
             ],
             outputs=[
                 ProcessingOutput(output_name="evaluation", s3_output=ProcessingS3Output(
-                    s3_uri=f"{s3}/evaluation", local_path="/opt/ml/processing/evaluation",
+                    # Per-execution prefix: each model package's metrics link keeps its own report.
+                    s3_uri=Join(on="/", values=[f"{s3}/evaluation", ExecutionVariables.PIPELINE_EXECUTION_ID]),
+                    local_path="/opt/ml/processing/evaluation",
                     s3_upload_mode="EndOfJob")),
             ],
         ),

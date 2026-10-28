@@ -275,6 +275,7 @@ Resources:
               else:
                   raise RuntimeError(f"Endpoint {name} is {current['EndpointStatus']}; cannot deploy now")
               print(f"{action} {name} -> {config}")
+              status = "unknown"
 
               # Wait for the result so the pipeline step fails if the new model doesn't come up.
               while context.get_remaining_time_in_millis() > 20_000:

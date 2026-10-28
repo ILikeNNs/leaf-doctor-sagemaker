@@ -20,9 +20,9 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 
+from inference import IMAGENET_MEAN, IMAGENET_STD, eval_transform
+
 CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", "/opt/ml/checkpoints")  # override for local runs
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def build_model(arch, num_classes):
@@ -46,14 +46,8 @@ def loaders(train_dir, val_dir, img_size, batch_size, workers):
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
-    eval_tf = transforms.Compose([
-        transforms.Resize(int(img_size * 1.14)),
-        transforms.CenterCrop(img_size),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ])
     train_ds = datasets.ImageFolder(train_dir, train_tf)
-    val_ds = datasets.ImageFolder(val_dir, eval_tf)
+    val_ds = datasets.ImageFolder(val_dir, eval_transform(img_size))
     if train_ds.classes != val_ds.classes:
         raise RuntimeError("Train and val class lists differ")
     kwargs = dict(batch_size=batch_size, num_workers=workers, pin_memory=True, persistent_workers=workers > 0)

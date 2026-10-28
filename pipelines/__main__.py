@@ -12,7 +12,6 @@ import argparse
 import json
 
 import boto3
-from sagemaker.core import image_uris
 from sagemaker.core.workflow.pipeline_context import PipelineSession
 
 from pipelines import config, deploy_pipeline, train_pipeline
@@ -55,10 +54,7 @@ def main():
         params = {}
         if args.smoke:
             params = {"MaxImagesPerClass": 50, "Epochs": 1, "TrainInstanceType": "ml.m5.xlarge",
-                      "TrainImage": image_uris.retrieve(
-                          "pytorch", region=config.REGION, version=config.PYTORCH_VERSION,
-                          py_version=config.PY_VERSION, instance_type="ml.m5.xlarge",
-                          image_scope="training"),
+                      "TrainImage": config.pytorch_image("ml.m5.xlarge"),
                       "MinTestAccuracy": 0.0}
         elif args.instance_type:
             params = {"TrainInstanceType": args.instance_type}
